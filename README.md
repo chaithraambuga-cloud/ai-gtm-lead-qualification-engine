@@ -109,4 +109,10 @@ This repository represents a tested functional prototype, not a production deplo
 ## Technology
 
 Salesforce, n8n, REST APIs, OAuth 2.0, SOQL, JavaScript, JSON, webhooks, Google Gemini, GitHub
+## Companion Project: Clay Account Enrichment and Personalization
 
+A standalone Clay workflow that processes five target accounts through company enrichment, public data-intelligence signal research, and AI-generated persona-specific outreach.
+
+This workflow demonstrates hands-on experience with Clay Workflows, Claygent, prompt engineering, upstream input mapping, enrichment, and grounded personalization. It is a separate companion prototype and is not directly integrated with the Salesforce–n8n workflow.
+
+[View the Clay project](./clay-account-enrichment/)
