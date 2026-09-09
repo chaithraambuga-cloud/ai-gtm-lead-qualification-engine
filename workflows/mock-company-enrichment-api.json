@@ -1,0 +1,88 @@
+{
+  "name": "Mock Company Enrichment API",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "mock-company-enrichment",
+        "authentication": "headerAuth",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        0,
+        0
+      ],
+      "id": "7527ec90-4ab0-4e54-bc44-b385a2fac7b7",
+      "name": "Receive Enrichment Request",
+      "webhookId": "2a68b4a5-a168-4eb4-b1af-4f9799b2deab",
+      "credentials": {
+        "httpHeaderAuth": {
+          "name": "Mock Enrichment API Auth"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const request = $json.body ?? $json;\n\nconst website = String(request.website || '')\n  .trim()\n  .toLowerCase();\n\nif (!website) {\n  return {\n    json: {\n      success: false,\n      statusCode: 422,\n      errorCode: 'MISSING_DOMAIN',\n      errorMessage: 'A company website is required for enrichment',\n      salesforceLeadId: request.salesforceLeadId || null\n    }\n  };\n}\n\nlet domain;\n\ntry {\n  domain = new URL(website).hostname.replace(/^www\\./, '');\n} catch {\n  domain = website\n    .replace(/^https?:\\/\\//, '')\n    .replace(/^www\\./, '')\n    .split('/')[0];\n}\n\nconst companyProfiles = {\n  'dataharbor-labs.example.com': {\n    companyName: 'DataHarbor Labs',\n    industry: 'Technology',\n    numberOfEmployees: 1200,\n    annualRevenue: 180000000,\n    headquartersCountry: 'India'\n  },\n\n  'insightforge.example.com': {\n    companyName: 'InsightForge',\n    industry: 'Technology',\n    numberOfEmployees: 650,\n    annualRevenue: 95000000,\n    headquartersCountry: 'India'\n  }\n};\n\nconst profile = companyProfiles[domain];\n\nif (!profile) {\n  return {\n    json: {\n      success: false,\n      statusCode: 404,\n      errorCode: 'COMPANY_NOT_FOUND',\n      errorMessage: `No enrichment profile found for domain: ${domain}`,\n      salesforceLeadId: request.salesforceLeadId || null,\n      domain\n    }\n  };\n}\n\nreturn {\n  json: {\n    success: true,\n    statusCode: 200,\n    salesforceLeadId: request.salesforceLeadId || null,\n    domain,\n    enrichmentSource: 'Mock Company Enrichment API',\n    enrichedAt: new Date().toISOString(),\n    company: profile\n  }\n};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        224,
+        0
+      ],
+      "id": "3843b0ea-d270-4cde-8b2d-61cddad69795",
+      "name": "Lookup Mock Company Profile"
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ $json }}",
+        "options": {
+          "responseCode": "={{ $json.statusCode }}"
+        }
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        448,
+        0
+      ],
+      "id": "752de0bd-5e9e-44eb-9360-3ee5fcf657cc",
+      "name": "Return Enrichment Response"
+    }
+  ],
+  "connections": {
+    "Receive Enrichment Request": {
+      "main": [
+        [
+          {
+            "node": "Lookup Mock Company Profile",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Lookup Mock Company Profile": {
+      "main": [
+        [
+          {
+            "node": "Return Enrichment Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  }
+}

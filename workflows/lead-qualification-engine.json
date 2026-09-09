@@ -1,0 +1,673 @@
+{
+  "name": "AI GTM Lead Qualification Engine",
+  "nodes": [
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        0
+      ],
+      "id": "a3593726-4a46-4a63-805b-971e8c74e56e",
+      "name": "Trigger Manual"
+    },
+    {
+      "parameters": {
+        "url": "https://YOUR_SALESFORCE_MY_DOMAIN/services/data/v67.0/query",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "oAuth2Api",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "q",
+              "value": "SELECT Id, FirstName, LastName, Company, Title, Email, Website, Industry, NumberOfEmployees, AnnualRevenue, Country, LeadSource, Status, Intent_Score__c, Enrichment_Status__c, Description FROM Lead WHERE Enrichment_Status__c = 'Pending' ORDER BY Intent_Score__c DESC"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        224,
+        0
+      ],
+      "id": "456ef290-b476-40a0-9632-3a0ad9c15dd2",
+      "name": "Get Pending Salesforce Leads",
+      "retryOnFail": true,
+      "waitBetweenTries": 2000,
+      "credentials": {
+        "oAuth2Api": {
+          "name": "Salesforce GTM OAuth"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const response = $input.first().json;\n\nif (!Array.isArray(response.records)) {\n  throw new Error('Salesforce response does not contain a records array');\n}\n\nreturn response.records.map((lead) => {\n  const missingFields = [];\n\n  if (!lead.Website) missingFields.push('Website');\n  if (!lead.Industry) missingFields.push('Industry');\n  if (lead.NumberOfEmployees == null) {\n    missingFields.push('NumberOfEmployees');\n  }\n  if (lead.AnnualRevenue == null) {\n    missingFields.push('AnnualRevenue');\n  }\n\n  return {\n    json: {\n      salesforceLeadId: lead.Id,\n      firstName: lead.FirstName || '',\n      lastName: lead.LastName || '',\n      fullName: [lead.FirstName, lead.LastName]\n        .filter(Boolean)\n        .join(' '),\n      company: lead.Company || '',\n      title: lead.Title || '',\n      email: lead.Email || '',\n      website: lead.Website || null,\n      industry: lead.Industry || null,\n      numberOfEmployees: lead.NumberOfEmployees ?? null,\n      annualRevenue: lead.AnnualRevenue ?? null,\n      country: lead.Country || null,\n      leadSource: lead.LeadSource || null,\n      salesforceStatus: lead.Status || null,\n      intentScore: Number(lead.Intent_Score__c ?? 0),\n      enrichmentStatus: lead.Enrichment_Status__c || 'Pending',\n      description: lead.Description || '',\n      missingFields,\n      needsEnrichment: missingFields.length > 0\n    }\n  };\n});"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        448,
+        0
+      ],
+      "id": "e18164b8-1803-4d28-a37a-d5702e0b15c0",
+      "name": "Split and Normalize Leads"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const lead = $json;\n\nlet industryScore = 0;\nlet employeeScore = 0;\nlet revenueScore = 0;\nlet personaScore = 0;\nlet intentScorePoints = 0;\nlet completenessScore = 0;\n\n// 1. Industry fit: maximum 15 points\nconst targetIndustries = [\n  'technology',\n  'finance',\n  'banking',\n  'insurance',\n  'consulting',\n  'telecommunications'\n];\n\nconst normalizedIndustry = (lead.industry || '').toLowerCase();\n\nif (targetIndustries.includes(normalizedIndustry)) {\n  industryScore = 15;\n}\n\n// 2. Company size: maximum 15 points\nconst employees = lead.numberOfEmployees;\n\nif (employees >= 1000) {\n  employeeScore = 15;\n} else if (employees >= 200) {\n  employeeScore = 10;\n} else if (employees >= 50) {\n  employeeScore = 5;\n}\n\n// 3. Annual revenue: maximum 10 points\nconst revenue = lead.annualRevenue;\n\nif (revenue >= 100000000) {\n  revenueScore = 10;\n} else if (revenue >= 25000000) {\n  revenueScore = 7;\n} else if (revenue >= 5000000) {\n  revenueScore = 3;\n}\n\n// 4. Buyer persona: maximum 25 points\nconst normalizedTitle = (lead.title || '').toLowerCase();\n\nconst executiveTitles = [\n  'chief',\n  'cdo',\n  'cto',\n  'cio',\n  'vp',\n  'vice president',\n  'head',\n  'director'\n];\n\nconst influencerTitles = [\n  'manager',\n  'lead',\n  'senior'\n];\n\nif (executiveTitles.some(title => normalizedTitle.includes(title))) {\n  personaScore = 25;\n} else if (\n  influencerTitles.some(title => normalizedTitle.includes(title))\n) {\n  personaScore = 15;\n} else if (normalizedTitle) {\n  personaScore = 5;\n}\n\n// 5. Intent signal: maximum 25 points\nconst rawIntentScore = Number(lead.intentScore || 0);\n\nif (rawIntentScore >= 80) {\n  intentScorePoints = 25;\n} else if (rawIntentScore >= 60) {\n  intentScorePoints = 18;\n} else if (rawIntentScore >= 40) {\n  intentScorePoints = 10;\n} else {\n  intentScorePoints = 3;\n}\n\n// 6. Data completeness: maximum 10 points\nconst missingFieldCount = Array.isArray(lead.missingFields)\n  ? lead.missingFields.length\n  : 0;\n\ncompletenessScore = Math.max(0, 10 - missingFieldCount * 2.5);\n\n// Calculate final score\nconst icpScore = Math.round(\n  industryScore +\n  employeeScore +\n  revenueScore +\n  personaScore +\n  intentScorePoints +\n  completenessScore\n);\n\n// Assign qualification tier\nlet icpTier;\n\nif (icpScore >= 70) {\n  icpTier = 'High';\n} else if (icpScore >= 40) {\n  icpTier = 'Medium';\n} else {\n  icpTier = 'Low';\n}\n\nreturn {\n  json: {\n    ...lead,\n    icpScore,\n    icpTier,\n    scoreBreakdown: {\n      industry: industryScore,\n      employeeCount: employeeScore,\n      annualRevenue: revenueScore,\n      buyerPersona: personaScore,\n      intentSignal: intentScorePoints,\n      dataCompleteness: completenessScore\n    },\n    requiresAIAnalysis:\n      icpScore >= 70 && lead.needsEnrichment === false\n  }\n};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        672,
+        0
+      ],
+      "id": "a3abc63c-078f-4fe1-a898-6de3df50add7",
+      "name": "Calculate ICP Score"
+    },
+    {
+      "parameters": {
+        "mode": "expression",
+        "numberOutputs": 3,
+        "output": "={{ $json.needsEnrichment ? 0 : ($json.icpScore >= 70 ? 1 : 2) }}"
+      },
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.4,
+      "position": [
+        896,
+        0
+      ],
+      "id": "9ccee8e4-8855-4bc8-bde6-226d41a2d6a3",
+      "name": "Route Leads"
+    },
+    {
+      "parameters": {
+        "content": "0 — Enrichment Required\n1 — AI Qualification\n2 — Low Priority",
+        "height": 112,
+        "width": 208,
+        "color": "#0CB628"
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "position": [
+        896,
+        -128
+      ],
+      "typeVersion": 1,
+      "id": "184d5022-ad04-47a0-b96c-ea2e64b43c43",
+      "name": "Sticky Note"
+    },
+    {
+      "parameters": {
+        "modelId": {
+          "__rl": true,
+          "value": "models/gemini-3.1-flash-lite",
+          "mode": "list",
+          "cachedResultName": "models/gemini-3.1-flash-lite"
+        },
+        "messages": {
+          "values": [
+            {
+              "content": "={{ `You are a B2B SaaS GTM qualification analyst.\n\nEvaluate this Lead using only the supplied CRM data. Do not invent company facts, technologies, buying signals, or business problems.\n\nLEAD DATA\nSalesforce Lead ID: ${$json.salesforceLeadId}\nName: ${$json.fullName}\nCompany: ${$json.company}\nTitle: ${$json.title}\nIndustry: ${$json.industry}\nEmployees: ${$json.numberOfEmployees}\nAnnual Revenue: ${$json.annualRevenue}\nCountry: ${$json.country}\nLead Source: ${$json.leadSource}\nIntent Score: ${$json.intentScore}\nICP Score: ${$json.icpScore}\nICP Tier: ${$json.icpTier}\nScore Breakdown: ${JSON.stringify($json.scoreBreakdown)}\n\nReturn only one valid JSON object using this exact structure:\n\n{\n  \"salesforceLeadId\": \"copy the supplied Salesforce Lead ID\",\n  \"qualificationSummary\": \"2 concise sentences explaining the Lead's fit\",\n  \"nextBestAction\": \"one specific recommended action for the sales team\",\n  \"confidenceScore\": 0,\n  \"keySignals\": [\"signal 1\", \"signal 2\"],\n  \"riskFlags\": [\"risk 1\"]\n}\n\nRules:\n- confidenceScore must be an integer from 0 to 100.\n- keySignals must contain 2 to 4 items.\n- riskFlags must be an array; use an empty array when no clear risk exists.\n- Base every conclusion only on the supplied Lead data.\n- Do not include markdown or code fences.\n- Do not include any text before or after the JSON object.` }}"
+            }
+          ]
+        },
+        "builtInTools": {},
+        "options": {
+          "includeMergedResponse": true,
+          "maxOutputTokens": 500,
+          "topP": 0.2
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.googleGemini",
+      "typeVersion": 1.2,
+      "position": [
+        1200,
+        16
+      ],
+      "id": "3bd25ad1-d758-4845-8974-53848a8d32e1",
+      "name": "Generate AI Qualification",
+      "retryOnFail": true,
+      "waitBetweenTries": 5000,
+      "credentials": {
+        "googlePalmApi": {
+          "name": "Gemini GTM API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const modelResponse = $json;\n\n// Retrieve the original Lead associated with this Gemini response.\nconst sourceLead = $('Calculate ICP Score').item.json;\n\n// Support different Gemini/n8n response structures.\nlet rawResponse =\n  modelResponse.text ??\n  modelResponse.output ??\n  modelResponse.mergedResponse ??\n  modelResponse.response?.text ??\n  modelResponse.content;\n\n// Standard Gemini candidates response.\nif (\n  !rawResponse &&\n  Array.isArray(modelResponse.candidates) &&\n  modelResponse.candidates.length > 0\n) {\n  rawResponse = modelResponse.candidates[0]?.content?.parts\n    ?.map(part => part.text || '')\n    .join('');\n}\n\nif (!rawResponse) {\n  throw new Error(\n    `Gemini response text was not found. Available fields: ${Object.keys(\n      modelResponse\n    ).join(', ')}`\n  );\n}\n\nlet parsedResponse;\n\n// Some n8n versions may already return an object.\nif (typeof rawResponse === 'object') {\n  parsedResponse = rawResponse;\n} else {\n  let cleanedResponse = String(rawResponse).trim();\n\n  // Remove markdown fences if Gemini adds them.\n  cleanedResponse = cleanedResponse\n    .replace(/^```json\\s*/i, '')\n    .replace(/^```\\s*/i, '')\n    .replace(/\\s*```$/i, '')\n    .trim();\n\n  // Keep only the JSON object if surrounding text was added.\n  const firstBrace = cleanedResponse.indexOf('{');\n  const lastBrace = cleanedResponse.lastIndexOf('}');\n\n  if (firstBrace === -1 || lastBrace === -1) {\n    throw new Error('Gemini response does not contain a JSON object');\n  }\n\n  cleanedResponse = cleanedResponse.slice(firstBrace, lastBrace + 1);\n\n  try {\n    parsedResponse = JSON.parse(cleanedResponse);\n  } catch (error) {\n    throw new Error(`Invalid Gemini JSON: ${error.message}`);\n  }\n}\n\n// Validate required string fields.\nif (\n  typeof parsedResponse.qualificationSummary !== 'string' ||\n  !parsedResponse.qualificationSummary.trim()\n) {\n  throw new Error('Gemini qualificationSummary is missing');\n}\n\nif (\n  typeof parsedResponse.nextBestAction !== 'string' ||\n  !parsedResponse.nextBestAction.trim()\n) {\n  throw new Error('Gemini nextBestAction is missing');\n}\n\n// Validate confidence score.\nconst confidenceScore = Number(parsedResponse.confidenceScore);\n\nif (\n  !Number.isInteger(confidenceScore) ||\n  confidenceScore < 0 ||\n  confidenceScore > 100\n) {\n  throw new Error(\n    `Invalid Gemini confidenceScore: ${parsedResponse.confidenceScore}`\n  );\n}\n\n// Verify Gemini returned the correct Salesforce Lead ID.\nif (\n  parsedResponse.salesforceLeadId &&\n  parsedResponse.salesforceLeadId !== sourceLead.salesforceLeadId\n) {\n  throw new Error('Gemini returned a mismatched Salesforce Lead ID');\n}\n\nconst keySignals = Array.isArray(parsedResponse.keySignals)\n  ? parsedResponse.keySignals\n  : [];\n\nconst riskFlags = Array.isArray(parsedResponse.riskFlags)\n  ? parsedResponse.riskFlags\n  : [];\n\nreturn {\n  json: {\n    ...sourceLead,\n    aiQualificationSummary:\n      parsedResponse.qualificationSummary.trim(),\n    aiNextBestAction:\n      parsedResponse.nextBestAction.trim(),\n    aiConfidenceScore: confidenceScore,\n    aiKeySignals: keySignals,\n    aiRiskFlags: riskFlags,\n    aiProcessedAt: new Date().toISOString()\n  }\n};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1568,
+        16
+      ],
+      "id": "900b4d87-4849-4af0-9d51-4310fbb5b022",
+      "name": "Parse and Validate AI Output"
+    },
+    {
+      "parameters": {
+        "method": "PATCH",
+        "url": "={{ 'https://YOUR_SALESFORCE_MY_DOMAIN/services/data/v67.0/sobjects/Lead/' + $json.salesforceLeadId }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "oAuth2Api",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ {\n  \"ICP_Score__c\": $json.icpScore,\n  \"ICP_Tier__c\": $json.icpTier,\n  \"AI_Qualification_Summary__c\": $json.aiQualificationSummary,\n  \"AI_Next_Best_Action__c\": $json.aiNextBestAction,\n  \"AI_Confidence_Score__c\": $json.aiConfidenceScore,\n  \"Enrichment_Source__c\": \"Salesforce CRM + Gemini via n8n\",\n  \"Last_Enriched_At__c\": $json.aiProcessedAt,\n  \"Workflow_Run_ID__c\": String($execution.id),\n  \"Enrichment_Status__c\": \"Completed\",\n  \"Enrichment_Error__c\": null\n} }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        1792,
+        16
+      ],
+      "id": "89be4a39-198b-4256-8fd9-3acaf56000e5",
+      "name": "Update Qualified Lead in Salesforce",
+      "executeOnce": false,
+      "retryOnFail": true,
+      "waitBetweenTries": 2000,
+      "credentials": {
+        "oAuth2Api": {
+          "name": "Salesforce GTM OAuth"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://YOUR_N8N_HOST/webhook/mock-company-enrichment",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{\n  {\n    \"salesforceLeadId\": $json.salesforceLeadId,\n    \"website\": $json.website\n  }\n}}",
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true
+            }
+          }
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        1232,
+        -384
+      ],
+      "id": "4717bd0f-e0be-4308-83be-849e238fa7a9",
+      "name": "Call Company Enrichment API",
+      "retryOnFail": true,
+      "waitBetweenTries": 2000,
+      "credentials": {
+        "httpHeaderAuth": {
+          "name": "Mock Enrichment API Auth"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// The enrichment response may be returned directly or inside \"body\"\nconst response = $json.body ?? $json;\n\n// Retrieve the corresponding Lead before the HTTP request\nconst originalLead = $('Route Leads').item.json;\n\nconst success =\n  response.success === true &&\n  Number(response.statusCode) === 200 &&\n  response.company;\n\nif (success) {\n  return {\n    json: {\n      ...originalLead,\n\n      // Enriched company information\n      company: response.company.companyName ?? originalLead.company,\n      industry: response.company.industry ?? originalLead.industry,\n      numberOfEmployees:\n        response.company.numberOfEmployees ??\n        originalLead.numberOfEmployees,\n      annualRevenue:\n        response.company.annualRevenue ??\n        originalLead.annualRevenue,\n      country:\n        response.company.headquartersCountry ??\n        originalLead.country,\n\n      // Enrichment metadata\n      enrichmentSucceeded: true,\n      enrichmentStatus: \"Completed\",\n      enrichmentSource:\n        response.enrichmentSource ?? \"Mock Company Enrichment API\",\n      enrichedAt: response.enrichedAt ?? new Date().toISOString(),\n      enrichmentError: null,\n\n      // Recalculate these after enrichment\n      needsEnrichment: false,\n      missingFields: [],\n      missingFieldCount: 0\n    }\n  };\n}\n\nreturn {\n  json: {\n    ...originalLead,\n\n    enrichmentSucceeded: false,\n    enrichmentStatus: \"Failed\",\n    enrichmentSource: \"Mock Company Enrichment API\",\n    enrichedAt: new Date().toISOString(),\n    enrichmentError:\n      response.errorMessage ??\n      response.message ??\n      \"Company enrichment failed\",\n\n    enrichmentErrorCode:\n      response.errorCode ?? \"UNKNOWN_ENRICHMENT_ERROR\",\n\n    enrichmentHttpStatus:\n      Number(response.statusCode ?? $json.statusCode ?? 500)\n  }\n};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1456,
+        -384
+      ],
+      "id": "77c6f5e7-c946-4cc7-ba97-d9b3851e0504",
+      "name": "Merge Enrichment Results"
+    },
+    {
+      "parameters": {
+        "mode": "expression",
+        "numberOutputs": 2,
+        "output": "={{ $json.enrichmentSucceeded ? 0 : 1 }}"
+      },
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.4,
+      "position": [
+        1680,
+        -384
+      ],
+      "id": "4867338a-0eea-40f7-a0fe-0fa12d7a504c",
+      "name": "Route Enrichment Result"
+    },
+    {
+      "parameters": {
+        "content": "Output 0 — Enrichment Successful → Recalculate ICP Score\nOutput 1 — Enrichment Failed → Save Error in Salesforce",
+        "color": "#26AE24"
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "position": [
+        1664,
+        -576
+      ],
+      "typeVersion": 1,
+      "id": "31cab16e-f824-48c3-9712-a4454aa4a511",
+      "name": "Sticky Note1"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const lead = $json;\n\nlet industryScore = 0;\nlet employeeScore = 0;\nlet revenueScore = 0;\nlet personaScore = 0;\nlet intentScorePoints = 0;\nlet completenessScore = 0;\n\n// 1. Industry fit: maximum 15 points\nconst targetIndustries = [\n  'technology',\n  'finance',\n  'banking',\n  'insurance',\n  'consulting',\n  'telecommunications'\n];\n\nconst normalizedIndustry = (lead.industry || '').toLowerCase();\n\nif (targetIndustries.includes(normalizedIndustry)) {\n  industryScore = 15;\n}\n\n// 2. Company size: maximum 15 points\nconst employees = lead.numberOfEmployees;\n\nif (employees >= 1000) {\n  employeeScore = 15;\n} else if (employees >= 200) {\n  employeeScore = 10;\n} else if (employees >= 50) {\n  employeeScore = 5;\n}\n\n// 3. Annual revenue: maximum 10 points\nconst revenue = lead.annualRevenue;\n\nif (revenue >= 100000000) {\n  revenueScore = 10;\n} else if (revenue >= 25000000) {\n  revenueScore = 7;\n} else if (revenue >= 5000000) {\n  revenueScore = 3;\n}\n\n// 4. Buyer persona: maximum 25 points\nconst normalizedTitle = (lead.title || '').toLowerCase();\n\nconst executiveTitles = [\n  'chief',\n  'cdo',\n  'cto',\n  'cio',\n  'vp',\n  'vice president',\n  'head',\n  'director'\n];\n\nconst influencerTitles = [\n  'manager',\n  'lead',\n  'senior'\n];\n\nif (executiveTitles.some(title => normalizedTitle.includes(title))) {\n  personaScore = 25;\n} else if (\n  influencerTitles.some(title => normalizedTitle.includes(title))\n) {\n  personaScore = 15;\n} else if (normalizedTitle) {\n  personaScore = 5;\n}\n\n// 5. Intent signal: maximum 25 points\nconst rawIntentScore = Number(lead.intentScore || 0);\n\nif (rawIntentScore >= 80) {\n  intentScorePoints = 25;\n} else if (rawIntentScore >= 60) {\n  intentScorePoints = 18;\n} else if (rawIntentScore >= 40) {\n  intentScorePoints = 10;\n} else {\n  intentScorePoints = 3;\n}\n\n// 6. Data completeness: maximum 10 points\nconst missingFieldCount = Array.isArray(lead.missingFields)\n  ? lead.missingFields.length\n  : 0;\n\ncompletenessScore = Math.max(0, 10 - missingFieldCount * 2.5);\n\n// Calculate final score\nconst icpScore = Math.round(\n  industryScore +\n  employeeScore +\n  revenueScore +\n  personaScore +\n  intentScorePoints +\n  completenessScore\n);\n\n// Assign qualification tier\nlet icpTier;\n\nif (icpScore >= 70) {\n  icpTier = 'High';\n} else if (icpScore >= 40) {\n  icpTier = 'Medium';\n} else {\n  icpTier = 'Low';\n}\n\nreturn {\n  json: {\n    ...lead,\n    icpScore,\n    icpTier,\n    scoreBreakdown: {\n      industry: industryScore,\n      employeeCount: employeeScore,\n      annualRevenue: revenueScore,\n      buyerPersona: personaScore,\n      intentSignal: intentScorePoints,\n      dataCompleteness: completenessScore\n    },\n    requiresAIAnalysis:\n      icpScore >= 70 && lead.needsEnrichment === false\n  }\n};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2064,
+        -512
+      ],
+      "id": "27ee3128-79a8-4256-a802-b4c6eb244660",
+      "name": "Recalculate ICP After Enrichment"
+    },
+    {
+      "parameters": {
+        "mode": "expression",
+        "numberOutputs": 2,
+        "output": "={{ $json.requiresAIAnalysis ? 0 : 1 }}"
+      },
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.4,
+      "position": [
+        2288,
+        -512
+      ],
+      "id": "6fbc2e87-4c0a-4995-a719-43ff182cdbae",
+      "name": "Route After Enrichment Scoring"
+    },
+    {
+      "parameters": {
+        "method": "PATCH",
+        "url": "={{ 'https://YOUR_SALESFORCE_MY_DOMAIN/services/data/v67.0/sobjects/Lead/' + $json.salesforceLeadId }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "oAuth2Api",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{\n  {\n    \"Company\": $json.company,\n    \"Industry\": $json.industry,\n    \"NumberOfEmployees\": $json.numberOfEmployees,\n    \"AnnualRevenue\": $json.annualRevenue,\n    \"Country\": $json.country,\n    \"ICP_Score__c\": $json.icpScore,\n    \"ICP_Tier__c\": $json.icpTier,\n    \"Enrichment_Status__c\": \"Completed\",\n    \"Enrichment_Source__c\": $json.enrichmentSource,\n    \"Last_Enriched_At__c\": $json.enrichedAt,\n    \"Workflow_Run_ID__c\": String($execution.id),\n    \"Enrichment_Error__c\": null\n  }\n}}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        2576,
+        -496
+      ],
+      "id": "d1a15428-de53-40cb-80fe-162621aa5583",
+      "name": "Update Enriched Medium Lead in Salesforce",
+      "retryOnFail": true,
+      "waitBetweenTries": 2000,
+      "credentials": {
+        "oAuth2Api": {
+          "name": "Salesforce GTM OAuth"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "PATCH",
+        "url": "={{ 'https://YOUR_SALESFORCE_MY_DOMAIN/services/data/v67.0/sobjects/Lead/' + $json.salesforceLeadId }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "oAuth2Api",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{\n  {\n    \"ICP_Score__c\": $json.icpScore,\n    \"ICP_Tier__c\": $json.icpTier,\n    \"Enrichment_Status__c\": \"Failed\",\n    \"Enrichment_Source__c\": $json.enrichmentSource,\n    \"Last_Enriched_At__c\": $json.enrichedAt,\n    \"Workflow_Run_ID__c\": String($execution.id),\n    \"Enrichment_Error__c\":\n      ($json.enrichmentErrorCode ?? \"UNKNOWN_ERROR\") +\n      \": \" +\n      ($json.enrichmentError ?? \"Company enrichment failed\")\n  }\n}}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        1904,
+        -288
+      ],
+      "id": "55c7ffab-e3fe-4739-b90e-52396a44ab78",
+      "name": "Log Enrichment Failure in Salesforce",
+      "retryOnFail": true,
+      "waitBetweenTries": 2000,
+      "credentials": {
+        "oAuth2Api": {
+          "name": "Salesforce GTM OAuth"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "modelId": {
+          "__rl": true,
+          "value": "models/gemini-3.1-flash-lite",
+          "mode": "list",
+          "cachedResultName": "models/gemini-3.1-flash-lite"
+        },
+        "messages": {
+          "values": [
+            {
+              "content": "={{ `You are a B2B SaaS GTM qualification analyst.\n\nEvaluate this Lead using only the supplied CRM data. Do not invent company facts, technologies, buying signals, or business problems.\n\nLEAD DATA\nSalesforce Lead ID: ${$json.salesforceLeadId}\nName: ${$json.fullName}\nCompany: ${$json.company}\nTitle: ${$json.title}\nIndustry: ${$json.industry}\nEmployees: ${$json.numberOfEmployees}\nAnnual Revenue: ${$json.annualRevenue}\nCountry: ${$json.country}\nLead Source: ${$json.leadSource}\nIntent Score: ${$json.intentScore}\nICP Score: ${$json.icpScore}\nICP Tier: ${$json.icpTier}\nScore Breakdown: ${JSON.stringify($json.scoreBreakdown)}\n\nReturn only one valid JSON object using this exact structure:\n\n{\n  \"salesforceLeadId\": \"copy the supplied Salesforce Lead ID\",\n  \"qualificationSummary\": \"2 concise sentences explaining the Lead's fit\",\n  \"nextBestAction\": \"one specific recommended action for the sales team\",\n  \"confidenceScore\": 0,\n  \"keySignals\": [\"signal 1\", \"signal 2\"],\n  \"riskFlags\": [\"risk 1\"]\n}\n\nRules:\n- confidenceScore must be an integer from 0 to 100.\n- keySignals must contain 2 to 4 items.\n- riskFlags must be an array; use an empty array when no clear risk exists.\n- Base every conclusion only on the supplied Lead data.\n- Do not include markdown or code fences.\n- Do not include any text before or after the JSON object.` }}"
+            }
+          ]
+        },
+        "builtInTools": {},
+        "options": {
+          "includeMergedResponse": true,
+          "maxOutputTokens": 500,
+          "topP": 0.2
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.googleGemini",
+      "typeVersion": 1.2,
+      "position": [
+        2624,
+        -784
+      ],
+      "id": "4d7bd6d9-9af7-4e88-8a91-5571b2dcb9fd",
+      "name": "Generate AI Qualification After Enrichment",
+      "retryOnFail": true,
+      "waitBetweenTries": 5000,
+      "credentials": {
+        "googlePalmApi": {
+          "name": "Gemini GTM API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const modelResponse = $json;\n\n// Retrieve the original Lead associated with this Gemini response.\nconst sourceLead = $('Recalculate ICP After Enrichment').item.json;\n\n// Support different Gemini/n8n response structures.\nlet rawResponse =\n  modelResponse.text ??\n  modelResponse.output ??\n  modelResponse.mergedResponse ??\n  modelResponse.response?.text ??\n  modelResponse.content;\n\n// Standard Gemini candidates response.\nif (\n  !rawResponse &&\n  Array.isArray(modelResponse.candidates) &&\n  modelResponse.candidates.length > 0\n) {\n  rawResponse = modelResponse.candidates[0]?.content?.parts\n    ?.map(part => part.text || '')\n    .join('');\n}\n\nif (!rawResponse) {\n  throw new Error(\n    `Gemini response text was not found. Available fields: ${Object.keys(\n      modelResponse\n    ).join(', ')}`\n  );\n}\n\nlet parsedResponse;\n\n// Some n8n versions may already return an object.\nif (typeof rawResponse === 'object') {\n  parsedResponse = rawResponse;\n} else {\n  let cleanedResponse = String(rawResponse).trim();\n\n  // Remove markdown fences if Gemini adds them.\n  cleanedResponse = cleanedResponse\n    .replace(/^```json\\s*/i, '')\n    .replace(/^```\\s*/i, '')\n    .replace(/\\s*```$/i, '')\n    .trim();\n\n  // Keep only the JSON object if surrounding text was added.\n  const firstBrace = cleanedResponse.indexOf('{');\n  const lastBrace = cleanedResponse.lastIndexOf('}');\n\n  if (firstBrace === -1 || lastBrace === -1) {\n    throw new Error('Gemini response does not contain a JSON object');\n  }\n\n  cleanedResponse = cleanedResponse.slice(firstBrace, lastBrace + 1);\n\n  try {\n    parsedResponse = JSON.parse(cleanedResponse);\n  } catch (error) {\n    throw new Error(`Invalid Gemini JSON: ${error.message}`);\n  }\n}\n\n// Validate required string fields.\nif (\n  typeof parsedResponse.qualificationSummary !== 'string' ||\n  !parsedResponse.qualificationSummary.trim()\n) {\n  throw new Error('Gemini qualificationSummary is missing');\n}\n\nif (\n  typeof parsedResponse.nextBestAction !== 'string' ||\n  !parsedResponse.nextBestAction.trim()\n) {\n  throw new Error('Gemini nextBestAction is missing');\n}\n\n// Validate confidence score.\nconst confidenceScore = Number(parsedResponse.confidenceScore);\n\nif (\n  !Number.isInteger(confidenceScore) ||\n  confidenceScore < 0 ||\n  confidenceScore > 100\n) {\n  throw new Error(\n    `Invalid Gemini confidenceScore: ${parsedResponse.confidenceScore}`\n  );\n}\n\n// Verify Gemini returned the correct Salesforce Lead ID.\nif (\n  parsedResponse.salesforceLeadId &&\n  parsedResponse.salesforceLeadId !== sourceLead.salesforceLeadId\n) {\n  throw new Error('Gemini returned a mismatched Salesforce Lead ID');\n}\n\nconst keySignals = Array.isArray(parsedResponse.keySignals)\n  ? parsedResponse.keySignals\n  : [];\n\nconst riskFlags = Array.isArray(parsedResponse.riskFlags)\n  ? parsedResponse.riskFlags\n  : [];\n\nreturn {\n  json: {\n    ...sourceLead,\n    aiQualificationSummary:\n      parsedResponse.qualificationSummary.trim(),\n    aiNextBestAction:\n      parsedResponse.nextBestAction.trim(),\n    aiConfidenceScore: confidenceScore,\n    aiKeySignals: keySignals,\n    aiRiskFlags: riskFlags,\n    aiProcessedAt: new Date().toISOString()\n  }\n};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2960,
+        -784
+      ],
+      "id": "f70f6005-84fa-4e88-aa02-db326df3af6a",
+      "name": "Parse AI Output After Enrichment"
+    },
+    {
+      "parameters": {
+        "method": "PATCH",
+        "url": "={{ 'https://YOUR_SALESFORCE_MY_DOMAIN/services/data/v67.0/sobjects/Lead/' + $json.salesforceLeadId }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "oAuth2Api",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{\n  {\n    \"Company\": $json.company,\n    \"Industry\": $json.industry,\n    \"NumberOfEmployees\": $json.numberOfEmployees,\n    \"AnnualRevenue\": $json.annualRevenue,\n    \"Country\": $json.country,\n\n    \"ICP_Score__c\": $json.icpScore,\n    \"ICP_Tier__c\": $json.icpTier,\n\n    \"AI_Qualification_Summary__c\": $json.aiQualificationSummary,\n    \"AI_Next_Best_Action__c\": $json.aiNextBestAction,\n    \"AI_Confidence_Score__c\": $json.aiConfidenceScore,\n\n    \"Enrichment_Status__c\": \"Completed\",\n    \"Enrichment_Source__c\": \"Mock Company Enrichment API + Gemini via n8n\",\n    \"Last_Enriched_At__c\": $json.enrichedAt,\n    \"Workflow_Run_ID__c\": String($execution.id),\n    \"Enrichment_Error__c\": null\n  }\n}}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        3200,
+        -784
+      ],
+      "id": "57685205-b53d-4d41-bd2c-a8a1f1fb54c6",
+      "name": "Update Enriched Qualified Lead in Salesforce",
+      "executeOnce": false,
+      "retryOnFail": true,
+      "waitBetweenTries": 2000,
+      "credentials": {
+        "oAuth2Api": {
+          "name": "Salesforce GTM OAuth"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "PATCH",
+        "url": "={{ 'https://YOUR_SALESFORCE_MY_DOMAIN/services/data/v67.0/sobjects/Lead/' + $json.salesforceLeadId }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "oAuth2Api",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{\n  {\n    \"ICP_Score__c\": $json.icpScore,\n    \"ICP_Tier__c\": $json.icpTier,\n    \"Enrichment_Status__c\": \"Skipped\",\n    \"Enrichment_Source__c\": \"n8n Deterministic ICP Scoring\",\n    \"Workflow_Run_ID__c\": String($execution.id),\n    \"Enrichment_Error__c\": null\n  }\n}}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        1168,
+        160
+      ],
+      "id": "c9915f4a-d878-4621-b54b-08831499626b",
+      "name": "Update Low Priority Lead in Salesforce",
+      "retryOnFail": true,
+      "waitBetweenTries": 2000,
+      "credentials": {
+        "oAuth2Api": {
+          "name": "Salesforce GTM OAuth"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 15
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.4,
+      "position": [
+        -16,
+        -208
+      ],
+      "id": "4af8e72a-7fb9-46c3-a9ed-963c79c62d1b",
+      "name": "Run Lead Qualification Every 15 Minutes"
+    }
+  ],
+  "connections": {
+    "Trigger Manual": {
+      "main": [
+        [
+          {
+            "node": "Get Pending Salesforce Leads",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Pending Salesforce Leads": {
+      "main": [
+        [
+          {
+            "node": "Split and Normalize Leads",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Split and Normalize Leads": {
+      "main": [
+        [
+          {
+            "node": "Calculate ICP Score",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Calculate ICP Score": {
+      "main": [
+        [
+          {
+            "node": "Route Leads",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route Leads": {
+      "main": [
+        [
+          {
+            "node": "Call Company Enrichment API",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Generate AI Qualification",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Update Low Priority Lead in Salesforce",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Generate AI Qualification": {
+      "main": [
+        [
+          {
+            "node": "Parse and Validate AI Output",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse and Validate AI Output": {
+      "main": [
+        [
+          {
+            "node": "Update Qualified Lead in Salesforce",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Call Company Enrichment API": {
+      "main": [
+        [
+          {
+            "node": "Merge Enrichment Results",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge Enrichment Results": {
+      "main": [
+        [
+          {
+            "node": "Route Enrichment Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route Enrichment Result": {
+      "main": [
+        [
+          {
+            "node": "Recalculate ICP After Enrichment",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Log Enrichment Failure in Salesforce",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Recalculate ICP After Enrichment": {
+      "main": [
+        [
+          {
+            "node": "Route After Enrichment Scoring",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route After Enrichment Scoring": {
+      "main": [
+        [
+          {
+            "node": "Generate AI Qualification After Enrichment",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Update Enriched Medium Lead in Salesforce",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Generate AI Qualification After Enrichment": {
+      "main": [
+        [
+          {
+            "node": "Parse AI Output After Enrichment",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse AI Output After Enrichment": {
+      "main": [
+        [
+          {
+            "node": "Update Enriched Qualified Lead in Salesforce",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Run Lead Qualification Every 15 Minutes": {
+      "main": [
+        [
+          {
+            "node": "Get Pending Salesforce Leads",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  }
+}
